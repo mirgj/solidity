@@ -95,9 +95,7 @@ public:
 
 	using MemberMap = std::vector<Member>;
 
-	MemberList() {}
 	explicit MemberList(MemberMap const& _members): m_memberTypes(_members) {}
-	MemberList& operator=(MemberList&& _other);
 	void combine(MemberList const& _other);
 	TypePointer memberType(std::string const& _name) const
 	{
@@ -132,6 +130,8 @@ private:
 	mutable std::unique_ptr<StorageOffsets> m_storageOffsets;
 };
 
+static_assert(std::is_nothrow_move_constructible<MemberList>::value, "MemberList should be noexcept move constructible");
+
 /**
  * Abstract base class that forms the root of the type hierarchy.
  */
@@ -141,7 +141,7 @@ public:
 	virtual ~Type() = default;
 	enum class Category
 	{
-		Integer, RationalNumber, StringLiteral, Bool, FixedPoint, Array,
+		Address, Integer, RationalNumber, StringLiteral, Bool, FixedPoint, Array,
 		FixedBytes, Contract, Struct, Function, Enum, Tuple,
 		Mapping, TypeType, Modifier, Magic, Module,
 		InaccessibleDynamic
@@ -172,7 +172,7 @@ public:
 	/// only if they have the same identifier.
 	/// The identifier should start with "t_".
 	/// Will not contain any character which would be invalid as an identifier.
-	std::string identifier() const { return escapeIdentifier(richIdentifier()); }
+	std::string identifier() const;
 
 	/// More complex identifier strings use "parentheses", where $_ is interpreted as as
 	/// "opening parenthesis", _$ as "closing parenthesis", _$_ as "comma" and any $ that
@@ -280,6 +280,11 @@ public:
 	/// This for example returns address for contract types.
 	/// If there is no such type, returns an empty shared pointer.
 	virtual TypePointer encodingType() const { return TypePointer(); }
+	/// @returns the encoding type used under the given circumstances for the type of an expression
+	/// when used for e.g. abi.encode(...) or the empty pointer if the object
+	/// cannot be encoded.
+	/// This is different from encodingType since it takes implicit conversions into account.
+	TypePointer fullEncodingType(bool _inLibraryCall, bool _encoderV2, bool _packed) const;
 	/// @returns a (simpler) type that is used when decoding this type in calldata.
 	virtual TypePointer decodingType() const { return encodingType(); }
 	/// @returns a type that will be used outside of Solidity for e.g. function signatures.
@@ -309,15 +314,57 @@ protected:
 };
 
 /**
- * Any kind of integer type (signed, unsigned, address).
+ * Type for addresses.
+ */
+class AddressType: public Type
+{
+public:
+    static AddressType& address() { static std::shared_ptr<AddressType> addr(std::make_shared<AddressType>(StateMutability::NonPayable)); return *addr; }
+    static AddressType& addressPayable() { static std::shared_ptr<AddressType> addr(std::make_shared<AddressType>(StateMutability::Payable)); return *addr; }
+
+	virtual Category category() const override { return Category::Address; }
+
+	explicit AddressType(StateMutability _stateMutability);
+
+	virtual std::string richIdentifier() const override;
+	virtual bool isImplicitlyConvertibleTo(Type const& _other) const override;
+	virtual bool isExplicitlyConvertibleTo(Type const& _convertTo) const override;
+	virtual TypePointer unaryOperatorResult(Token::Value _operator) const override;
+	virtual TypePointer binaryOperatorResult(Token::Value _operator, TypePointer const& _other) const override;
+
+	virtual bool operator==(Type const& _other) const override;
+
+	virtual unsigned calldataEncodedSize(bool _padded = true) const override { return _padded ? 32 : 160 / 8; }
+	virtual unsigned storageBytes() const override { return 160 / 8; }
+	virtual bool isValueType() const override { return true; }
+
+	virtual MemberList::MemberMap nativeMembers(ContractDefinition const*) const override;
+
+	virtual std::string toString(bool _short) const override;
+	virtual std::string canonicalName() const override;
+
+	virtual u256 literalValue(Literal const* _literal) const override;
+
+	virtual TypePointer encodingType() const override { return shared_from_this(); }
+	virtual TypePointer interfaceType(bool) const override { return shared_from_this(); }
+
+	StateMutability stateMutability(void) const { return m_stateMutability; }
+
+private:
+	StateMutability m_stateMutability;
+};
+
+/**
+ * Any kind of integer type (signed, unsigned).
  */
 class IntegerType: public Type
 {
 public:
 	enum class Modifier
 	{
-		Unsigned, Signed, Address
+		Unsigned, Signed
 	};
+
 	virtual Category category() const override { return Category::Integer; }
 
 	explicit IntegerType(unsigned _bits, Modifier _modifier = Modifier::Unsigned);
@@ -334,17 +381,12 @@ public:
 	virtual unsigned storageBytes() const override { return m_bits / 8; }
 	virtual bool isValueType() const override { return true; }
 
-	virtual MemberList::MemberMap nativeMembers(ContractDefinition const*) const override;
-
 	virtual std::string toString(bool _short) const override;
-
-	virtual u256 literalValue(Literal const* _literal) const override;
 
 	virtual TypePointer encodingType() const override { return shared_from_this(); }
 	virtual TypePointer interfaceType(bool) const override { return shared_from_this(); }
 
 	unsigned numBits() const { return m_bits; }
-	bool isAddress() const { return m_modifier == Modifier::Address; }
 	bool isSigned() const { return m_modifier == Modifier::Signed; }
 
 	bigint minValue() const;
@@ -418,12 +460,12 @@ public:
 
 	virtual Category category() const override { return Category::RationalNumber; }
 
-	/// @returns true if the literal is a valid integer.
-	static std::tuple<bool, rational> isValidLiteral(Literal const& _literal);
+	static TypePointer forLiteral(Literal const& _literal);
 
-	explicit RationalNumberType(rational const& _value):
-		m_value(_value)
+	explicit RationalNumberType(rational const& _value, TypePointer const& _compatibleBytesType = TypePointer()):
+		m_value(_value), m_compatibleBytesType(_compatibleBytesType)
 	{}
+
 	virtual bool isImplicitlyConvertibleTo(Type const& _convertTo) const override;
 	virtual bool isExplicitlyConvertibleTo(Type const& _convertTo) const override;
 	virtual TypePointer unaryOperatorResult(Token::Value _operator) const override;
@@ -441,7 +483,8 @@ public:
 
 	/// @returns the smallest integer type that can hold the value or an empty pointer if not possible.
 	std::shared_ptr<IntegerType const> integerType() const;
-	/// @returns the smallest fixed type that can  hold the value or incurs the least precision loss.
+	/// @returns the smallest fixed type that can  hold the value or incurs the least precision loss,
+	/// unless the value was truncated, then a suitable type will be chosen to indicate such event.
 	/// If the integer part does not fit, returns an empty pointer.
 	std::shared_ptr<FixedPointType const> fixedPointType() const;
 
@@ -456,6 +499,13 @@ public:
 
 private:
 	rational m_value;
+
+	/// Bytes type to which the rational can be explicitly converted.
+	/// Empty for all rationals that are not directly parsed from hex literals.
+	TypePointer m_compatibleBytesType;
+
+	/// @returns true if the literal is a valid integer.
+	static std::tuple<bool, rational> isValidLiteral(Literal const& _literal);
 
 	/// @returns true if the literal is a valid rational number.
 	static std::tuple<bool, rational> parseRational(std::string const& _value);
@@ -615,6 +665,9 @@ protected:
 class ArrayType: public ReferenceType
 {
 public:
+	static ArrayType& bytesMemory() { static std::shared_ptr<ArrayType> addr(std::make_shared<ArrayType>(DataLocation::Memory)); return *addr; }
+	static ArrayType& stringMemory() { static std::shared_ptr<ArrayType> addr(std::make_shared<ArrayType>(DataLocation::Memory, true)); return *addr; }
+
 	virtual Category category() const override { return Category::Array; }
 
 	/// Constructor for a byte array ("bytes") and string.
@@ -692,9 +745,9 @@ public:
 	virtual Category category() const override { return Category::Contract; }
 	explicit ContractType(ContractDefinition const& _contract, bool _super = false):
 		m_contract(_contract), m_super(_super) {}
-	/// Contracts can be implicitly converted to super classes and to addresses.
+	/// Contracts can be implicitly converted only to base contracts.
 	virtual bool isImplicitlyConvertibleTo(Type const& _convertTo) const override;
-	/// Contracts can be converted to themselves and to integers.
+	/// Contracts can only be explicitly converted to address types and base contracts.
 	virtual bool isExplicitlyConvertibleTo(Type const& _convertTo) const override;
 	virtual TypePointer unaryOperatorResult(Token::Value _operator) const override;
 	virtual std::string richIdentifier() const override;
@@ -716,7 +769,7 @@ public:
 	{
 		if (isSuper())
 			return TypePointer{};
-		return std::make_shared<IntegerType>(160, IntegerType::Modifier::Address);
+		return std::make_shared<AddressType>(isPayable() ? StateMutability::Payable : StateMutability::NonPayable);
 	}
 	virtual TypePointer interfaceType(bool _inLibrary) const override
 	{
@@ -740,8 +793,6 @@ public:
 	std::vector<std::tuple<VariableDeclaration const*, u256, unsigned>> stateVariables() const;
 
 private:
-	static void addNonConflictingAddressMembers(MemberList::MemberMap& _members);
-
 	ContractDefinition const& m_contract;
 	/// If true, it is the "super" type of the current contract, i.e. it contains only inherited
 	/// members.
@@ -888,15 +939,15 @@ public:
 	{
 		Internal, ///< stack-call using plain JUMP
 		External, ///< external call using CALL
-		CallCode, ///< external call using CALLCODE, i.e. not exchanging the storage
 		DelegateCall, ///< external call using DELEGATECALL, i.e. not exchanging the storage
 		BareCall, ///< CALL without function hash
 		BareCallCode, ///< CALLCODE without function hash
 		BareDelegateCall, ///< DELEGATECALL without function hash
+		BareStaticCall, ///< STATICCALL without function hash
 		Creation, ///< external call using CREATE
 		Send, ///< CALL, but without data and gas
 		Transfer, ///< CALL, but without data and throws on error
-		SHA3, ///< SHA3
+		KECCAK256, ///< KECCAK256
 		Selfdestruct, ///< SELFDESTRUCT
 		Revert, ///< REVERT
 		ECRecover, ///< CALL to special contract for ecrecover
@@ -914,6 +965,7 @@ public:
 		AddMod, ///< ADDMOD
 		MulMod, ///< MULMOD
 		ArrayPush, ///< .push() to a dynamically sized array in storage
+		ArrayPop, ///< .pop() from a dynamically sized array in storage
 		ByteArrayPush, ///< .push() to a dynamically sized byte array in storage
 		ObjectCreation, ///< array creation using new
 		Assert, ///< assert()
@@ -922,7 +974,8 @@ public:
 		ABIEncodePacked,
 		ABIEncodeWithSelector,
 		ABIEncodeWithSignature,
-		GasLeft ///< gasleft()
+		ABIDecode,
+		GasLeft, ///< gasleft()
 	};
 
 	virtual Category category() const override { return Category::Function; }
@@ -1001,6 +1054,7 @@ public:
 
 	virtual std::string richIdentifier() const override;
 	virtual bool operator==(Type const& _other) const override;
+	virtual bool isImplicitlyConvertibleTo(Type const& _convertTo) const override;
 	virtual bool isExplicitlyConvertibleTo(Type const& _convertTo) const override;
 	virtual TypePointer unaryOperatorResult(Token::Value _operator) const override;
 	virtual TypePointer binaryOperatorResult(Token::Value, TypePointer const&) const override;
@@ -1030,10 +1084,14 @@ public:
 	/// @param _selfType if the function is bound, this has to be supplied and is the type of the
 	/// expression the function is called on.
 	bool canTakeArguments(TypePointers const& _arguments, TypePointer const& _selfType = TypePointer()) const;
-	/// @returns true if the types of parameters are equal (does't check return parameter types)
-	bool hasEqualArgumentTypes(FunctionType const& _other) const;
+	/// @returns true if the types of parameters are equal (does not check return parameter types)
+	bool hasEqualParameterTypes(FunctionType const& _other) const;
+	/// @returns true iff the return types are equal (does not check parameter types)
+	bool hasEqualReturnTypes(FunctionType const& _other) const;
+	/// @returns true iff the function type is equal to the given type, ignoring state mutability differences.
+	bool equalExcludingStateMutability(FunctionType const& _other) const;
 
-	/// @returns true if the ABI is used for this call (only meaningful for external calls)
+	/// @returns true if the ABI is NOT used for this call (only meaningful for external calls)
 	bool isBareCall() const;
 	Kind const& kind() const { return m_kind; }
 	StateMutability stateMutability() const { return m_stateMutability; }
@@ -1057,18 +1115,22 @@ public:
 	ASTPointer<ASTString> documentation() const;
 
 	/// true iff arguments are to be padded to multiples of 32 bytes for external calls
-	bool padArguments() const { return !(m_kind == Kind::SHA3 || m_kind == Kind::SHA256 || m_kind == Kind::RIPEMD160 || m_kind == Kind::ABIEncodePacked); }
+	/// The only functions that do not pad are hash functions, the low-level call functions
+	/// and abi.encodePacked.
+	bool padArguments() const;
 	bool takesArbitraryParameters() const { return m_arbitraryParameters; }
 	/// true iff the function takes a single bytes parameter and it is passed on without padding.
-	/// @todo until 0.5.0, this is just a "recommendation".
 	bool takesSinglePackedBytesParameter() const
 	{
-		// @todo add the call kinds here with 0.5.0 and perhaps also log0.
 		switch (m_kind)
 		{
-		case FunctionType::Kind::SHA3:
+		case FunctionType::Kind::KECCAK256:
 		case FunctionType::Kind::SHA256:
 		case FunctionType::Kind::RIPEMD160:
+		case FunctionType::Kind::BareCall:
+		case FunctionType::Kind::BareCallCode:
+		case FunctionType::Kind::BareDelegateCall:
+		case FunctionType::Kind::BareStaticCall:
 			return true;
 		default:
 			return false;

@@ -28,7 +28,7 @@ become the new richest.
 
 ::
 
-    pragma solidity ^0.4.11;
+    pragma solidity >0.4.24;
 
     contract WithdrawalContract {
         address public richest;
@@ -36,7 +36,7 @@ become the new richest.
 
         mapping (address => uint) pendingWithdrawals;
 
-        function WithdrawalContract() public payable {
+        constructor() public payable {
             richest = msg.sender;
             mostSent = msg.value;
         }
@@ -65,13 +65,13 @@ This is as opposed to the more intuitive sending pattern:
 
 ::
 
-    pragma solidity ^0.4.11;
+    pragma solidity >0.4.24;
 
     contract SendContract {
-        address public richest;
+        address payable public richest;
         uint public mostSent;
 
-        function SendContract() public payable {
+        constructor() public payable {
             richest = msg.sender;
             mostSent = msg.value;
         }
@@ -93,7 +93,7 @@ Notice that, in this example, an attacker could trap the
 contract into an unusable state by causing ``richest`` to be
 the address of a contract that has a fallback function
 which fails (e.g. by using ``revert()`` or by just
-consuming more than the 2300 gas stipend). That way,
+consuming more than the 2300 gas stipend transferred to them). That way,
 whenever ``transfer`` is called to deliver funds to the
 "poisoned" contract, it will fail and thus also ``becomeRichest``
 will fail, with the contract being stuck forever.
@@ -198,7 +198,7 @@ restrictions highly readable.
             );
             _;
             if (msg.value > _amount)
-                msg.sender.send(msg.value - _amount);
+                msg.sender.transfer(msg.value - _amount);
         }
 
         function forceOwnerChange(address _newOwner)

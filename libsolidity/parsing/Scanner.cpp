@@ -243,22 +243,17 @@ bool Scanner::skipWhitespace()
 	return sourcePos() != startPosition;
 }
 
-bool Scanner::skipWhitespaceExceptLF()
+void Scanner::skipWhitespaceExceptUnicodeLinebreak()
 {
-	int const startPosition = sourcePos();
-	while (isWhiteSpace(m_char) && !isLineTerminator(m_char))
+	while (isWhiteSpace(m_char) && !isUnicodeLinebreak())
 		advance();
-	// Return whether or not we skipped any characters.
-	return sourcePos() != startPosition;
 }
 
 Token::Value Scanner::skipSingleLineComment()
 {
-	// The line terminator at the end of the line is not considered
-	// to be part of the single-line comment; it is recognized
-	// separately by the lexical grammar and becomes part of the
-	// stream of input elements for the syntactic grammar
-	while (!isLineTerminator(m_char))
+	// Line terminator is not part of the comment. If it is a
+	// non-ascii line terminator, it will result in a parser error.
+	while (!isUnicodeLinebreak())
 		if (!advance()) break;
 
 	return Token::Whitespace;
@@ -268,7 +263,9 @@ Token::Value Scanner::scanSingleLineDocComment()
 {
 	LiteralScope literal(this, LITERAL_TYPE_COMMENT);
 	advance(); //consume the last '/' at ///
-	skipWhitespaceExceptLF();
+
+	skipWhitespaceExceptUnicodeLinebreak();
+
 	while (!isSourcePastEndOfInput())
 	{
 		if (isLineTerminator(m_char))
@@ -287,6 +284,10 @@ Token::Value Scanner::scanSingleLineDocComment()
 				break; // next line is not a documentation comment, we are done
 
 		}
+		else if (isUnicodeLinebreak())
+			// Any line terminator that is not '\n' is considered to end the
+			// comment.
+			break;
 		addCommentLiteralChar(m_char);
 		advance();
 	}
@@ -320,6 +321,9 @@ Token::Value Scanner::scanMultiLineDocComment()
 	LiteralScope literal(this, LITERAL_TYPE_COMMENT);
 	bool endFound = false;
 	bool charsAdded = false;
+
+	while (isWhiteSpace(m_char) && !isLineTerminator(m_char))
+		advance();
 
 	while (!isSourcePastEndOfInput())
 	{
@@ -372,7 +376,7 @@ Token::Value Scanner::scanSlash()
 	if (m_char == '/')
 	{
 		if (!advance()) /* double slash comment directly before EOS */
-			return  Token::Whitespace;
+			return Token::Whitespace;
 		else if (m_char == '/')
 		{
 			// doxygen style /// comment
@@ -390,24 +394,27 @@ Token::Value Scanner::scanSlash()
 	{
 		// doxygen style /** natspec comment
 		if (!advance()) /* slash star comment before EOS */
-			return Token::Whitespace;
+			return Token::Illegal;
 		else if (m_char == '*')
 		{
 			advance(); //consume the last '*' at /**
-			skipWhitespaceExceptLF();
 
-			// special case of a closed normal multiline comment
-			if (!m_source.isPastEndOfInput() && m_source.get(0) == '/')
-				advance(); //skip the closing slash
-			else // we actually have a multiline documentation comment
+			// "/**/"
+			if (m_char == '/')
 			{
-				Token::Value comment;
-				m_nextSkippedComment.location.start = firstSlashPosition;
-				comment = scanMultiLineDocComment();
-				m_nextSkippedComment.location.end = sourcePos();
-				m_nextSkippedComment.token = comment;
+				advance(); //skip the closing slash
+				return Token::Whitespace;
 			}
-			return Token::Whitespace;
+			// we actually have a multiline documentation comment
+			Token::Value comment;
+			m_nextSkippedComment.location.start = firstSlashPosition;
+			comment = scanMultiLineDocComment();
+			m_nextSkippedComment.location.end = sourcePos();
+			m_nextSkippedComment.token = comment;
+			if (comment == Token::Illegal)
+				return Token::Illegal;
+			else
+				return Token::Whitespace;
 		}
 		else
 			return skipMultiLineComment();
@@ -435,11 +442,6 @@ void Scanner::scanToken()
 		m_nextToken.location.start = sourcePos();
 		switch (m_char)
 		{
-		case '\n':
-		case ' ':
-		case '\t':
-			token = selectToken(Token::Whitespace);
-			break;
 		case '"':
 		case '\'':
 			token = scanString();
@@ -675,10 +677,30 @@ bool Scanner::scanEscape()
 		if (!scanHexByte(c))
 			return false;
 		break;
+	default:
+		return false;
 	}
 
 	addLiteralChar(c);
 	return true;
+}
+
+bool Scanner::isUnicodeLinebreak()
+{
+	if (0x0a <= m_char && m_char <= 0x0d)
+		// line feed, vertical tab, form feed, carriage return
+		return true;
+	else if (!m_source.isPastEndOfInput(1) && uint8_t(m_source.get(0)) == 0xc2 && uint8_t(m_source.get(1)) == 0x85)
+		// NEL - U+0085, C2 85 in utf8
+		return true;
+	else if (!m_source.isPastEndOfInput(2) && uint8_t(m_source.get(0)) == 0xe2 && uint8_t(m_source.get(1)) == 0x80 && (
+		uint8_t(m_source.get(2)) == 0xa8 || uint8_t(m_source.get(2)) == 0xa9
+	))
+		// LS - U+2028, E2 80 A8  in utf8
+		// PS - U+2029, E2 80 A9  in utf8
+		return true;
+	else
+		return false;
 }
 
 Token::Value Scanner::scanString()
@@ -686,7 +708,7 @@ Token::Value Scanner::scanString()
 	char const quote = m_char;
 	advance();  // consume quote
 	LiteralScope literal(this, LITERAL_TYPE_STRING);
-	while (m_char != quote && !isSourcePastEndOfInput() && !isLineTerminator(m_char))
+	while (m_char != quote && !isSourcePastEndOfInput() && !isUnicodeLinebreak())
 	{
 		char c = m_char;
 		advance();
@@ -710,7 +732,7 @@ Token::Value Scanner::scanHexString()
 	char const quote = m_char;
 	advance();  // consume quote
 	LiteralScope literal(this, LITERAL_TYPE_STRING);
-	while (m_char != quote && !isSourcePastEndOfInput() && !isLineTerminator(m_char))
+	while (m_char != quote && !isSourcePastEndOfInput())
 	{
 		char c = m_char;
 		if (!scanHexByte(c))
@@ -724,10 +746,18 @@ Token::Value Scanner::scanHexString()
 	return Token::StringLiteral;
 }
 
+// Parse for regex [:digit:]+(_[:digit:]+)*
 void Scanner::scanDecimalDigits()
 {
-	while (isDecimalDigit(m_char))
-		addLiteralCharAndAdvance();
+	// MUST begin with a decimal digit.
+	if (!isDecimalDigit(m_char))
+		return;
+
+	// May continue with decimal digit or underscore for grouping.
+	do addLiteralCharAndAdvance();
+	while (!m_source.isPastEndOfInput() && (isDecimalDigit(m_char) || m_char == '_'));
+
+	// Defer further validation of underscore to SyntaxChecker.
 }
 
 Token::Value Scanner::scanNumber(char _charSeen)
@@ -738,6 +768,8 @@ Token::Value Scanner::scanNumber(char _charSeen)
 	{
 		// we have already seen a decimal point of the float
 		addLiteralChar('.');
+		if (m_char == '_')
+			return Token::Illegal;
 		scanDecimalDigits();  // we know we have at least one digit
 	}
 	else
@@ -755,7 +787,8 @@ Token::Value Scanner::scanNumber(char _charSeen)
 				addLiteralCharAndAdvance();
 				if (!isHexDigit(m_char))
 					return Token::Illegal; // we must have at least one hex digit after 'x'/'X'
-				while (isHexDigit(m_char))
+
+				while (isHexDigit(m_char) || m_char == '_') // We keep the underscores for later validation
 					addLiteralCharAndAdvance();
 			}
 			else if (isDecimalDigit(m_char))
@@ -768,8 +801,22 @@ Token::Value Scanner::scanNumber(char _charSeen)
 			scanDecimalDigits();  // optional
 			if (m_char == '.')
 			{
+				if (!m_source.isPastEndOfInput(1) && m_source.get(1) == '_')
+				{
+					// Assume the input may be a floating point number with leading '_' in fraction part.
+					// Recover by consuming it all but returning `Illegal` right away.
+					addLiteralCharAndAdvance(); // '.'
+					addLiteralCharAndAdvance(); // '_'
+					scanDecimalDigits();
+				}
+				if (m_source.isPastEndOfInput() || !isDecimalDigit(m_source.get(1)))
+				{
+					// A '.' has to be followed by a number.
+					literal.complete();
+					return Token::Number;
+				}
 				addLiteralCharAndAdvance();
-				scanDecimalDigits();  // optional
+				scanDecimalDigits();
 			}
 		}
 	}
@@ -779,8 +826,18 @@ Token::Value Scanner::scanNumber(char _charSeen)
 		solAssert(kind != HEX, "'e'/'E' must be scanned as part of the hex number");
 		if (kind != DECIMAL)
 			return Token::Illegal;
+		else if (!m_source.isPastEndOfInput(1) && m_source.get(1) == '_')
+		{
+			// Recover from wrongly placed underscore as delimiter in literal with scientific
+			// notation by consuming until the end.
+			addLiteralCharAndAdvance(); // 'e'
+			addLiteralCharAndAdvance(); // '_'
+			scanDecimalDigits();
+			literal.complete();
+			return Token::Number;
+		}
 		// scan exponent
-		addLiteralCharAndAdvance();
+		addLiteralCharAndAdvance(); // 'e' | 'E'
 		if (m_char == '+' || m_char == '-')
 			addLiteralCharAndAdvance();
 		if (!isDecimalDigit(m_char))

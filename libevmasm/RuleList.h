@@ -46,7 +46,7 @@ template <class S> S modWorkaround(S const& _a, S const& _b)
 
 /// @returns a list of simplification rules given certain match placeholders.
 /// A, B and C should represent constants, X and Y arbitrary expressions.
-/// The simplifications should neven change the order of evaluation of
+/// The simplifications should never change the order of evaluation of
 /// arbitrary operations.
 template <class Pattern>
 std::vector<SimplificationRule<Pattern>> simplificationRuleList(
@@ -59,7 +59,7 @@ std::vector<SimplificationRule<Pattern>> simplificationRuleList(
 {
 	std::vector<SimplificationRule<Pattern>> rules;
 	rules += std::vector<SimplificationRule<Pattern>>{
-		// arithmetics on constants
+		// arithmetic on constants
 		{{Instruction::ADD, {A, B}}, [=]{ return A.d() + B.d(); }, false},
 		{{Instruction::MUL, {A, B}}, [=]{ return A.d() * B.d(); }, false},
 		{{Instruction::SUB, {A, B}}, [=]{ return A.d() - B.d(); }, false},

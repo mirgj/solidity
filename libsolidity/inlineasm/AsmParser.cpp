@@ -150,7 +150,7 @@ assembly::Statement Parser::parseStatement()
 			expectToken(Token::Comma);
 			elementary = parseElementaryOperation();
 			if (elementary.type() != typeid(assembly::Identifier))
-				fatalParserError("Variable name expected in multiple assignemnt.");
+				fatalParserError("Variable name expected in multiple assignment.");
 			assignment.variableNames.emplace_back(boost::get<assembly::Identifier>(elementary));
 		}
 		while (currentToken() == Token::Comma);
@@ -173,7 +173,7 @@ assembly::Statement Parser::parseStatement()
 		if (currentToken() == Token::Assign && peekNextToken() != Token::Colon)
 		{
 			assembly::Assignment assignment = createWithLocation<assembly::Assignment>(identifier.location);
-			if (m_flavour != AsmFlavour::IULIA && instructions().count(identifier.name))
+			if (m_flavour != AsmFlavour::Yul && instructions().count(identifier.name))
 				fatalParserError("Cannot use instruction names for identifier names.");
 			advance();
 			assignment.variableNames.emplace_back(identifier);
@@ -279,7 +279,7 @@ assembly::Expression Parser::parseExpression()
 				"Expected '(' (instruction \"" +
 				instructionNames().at(instr.instruction) +
 				"\" expects " +
-				boost::lexical_cast<string>(args) +
+				to_string(args) +
 				" arguments)"
 			));
 	}
@@ -318,11 +318,6 @@ std::map<string, dev::solidity::Instruction> const& Parser::instructions()
 			transform(name.begin(), name.end(), name.begin(), [](unsigned char _c) { return tolower(_c); });
 			s_instructions[name] = instruction.second;
 		}
-
-		// add alias for suicide
-		s_instructions["suicide"] = solidity::Instruction::SELFDESTRUCT;
-		// add alis for sha3
-		s_instructions["sha3"] = solidity::Instruction::KECCAK256;
 	}
 	return s_instructions;
 }
@@ -362,7 +357,7 @@ Parser::ElementaryOperation Parser::parseElementaryOperation()
 		else
 			literal = currentLiteral();
 		// first search the set of instructions.
-		if (m_flavour != AsmFlavour::IULIA && instructions().count(literal))
+		if (m_flavour != AsmFlavour::Yul && instructions().count(literal))
 		{
 			dev::solidity::Instruction const& instr = instructions().at(literal);
 			ret = Instruction{location(), instr};
@@ -403,7 +398,7 @@ Parser::ElementaryOperation Parser::parseElementaryOperation()
 			""
 		};
 		advance();
-		if (m_flavour == AsmFlavour::IULIA)
+		if (m_flavour == AsmFlavour::Yul)
 		{
 			expectToken(Token::Colon);
 			literal.location.end = endPosition();
@@ -416,7 +411,7 @@ Parser::ElementaryOperation Parser::parseElementaryOperation()
 	}
 	default:
 		fatalParserError(
-			m_flavour == AsmFlavour::IULIA ?
+			m_flavour == AsmFlavour::Yul ?
 			"Literal or identifier expected." :
 			"Literal, identifier or instruction expected."
 		);
@@ -486,7 +481,7 @@ assembly::Expression Parser::parseCall(Parser::ElementaryOperation&& _initialOp)
 	RecursionGuard recursionGuard(*this);
 	if (_initialOp.type() == typeid(Instruction))
 	{
-		solAssert(m_flavour != AsmFlavour::IULIA, "Instructions are invalid in JULIA");
+		solAssert(m_flavour != AsmFlavour::Yul, "Instructions are invalid in Yul");
 		Instruction& instruction = boost::get<Instruction>(_initialOp);
 		FunctionalInstruction ret;
 		ret.instruction = instruction.instruction;
@@ -507,7 +502,7 @@ assembly::Expression Parser::parseCall(Parser::ElementaryOperation&& _initialOp)
 					"Expected expression (instruction \"" +
 					instructionNames().at(instr) +
 					"\" expects " +
-					boost::lexical_cast<string>(args) +
+					to_string(args) +
 					" arguments)"
 				));
 
@@ -519,7 +514,7 @@ assembly::Expression Parser::parseCall(Parser::ElementaryOperation&& _initialOp)
 						"Expected ',' (instruction \"" +
 						instructionNames().at(instr) +
 						"\" expects " +
-						boost::lexical_cast<string>(args) +
+						to_string(args) +
 						" arguments)"
 					));
 				else
@@ -532,7 +527,7 @@ assembly::Expression Parser::parseCall(Parser::ElementaryOperation&& _initialOp)
 				"Expected ')' (instruction \"" +
 				instructionNames().at(instr) +
 				"\" expects " +
-				boost::lexical_cast<string>(args) +
+				to_string(args) +
 				" arguments)"
 			));
 		expectToken(Token::RParen);
@@ -557,7 +552,7 @@ assembly::Expression Parser::parseCall(Parser::ElementaryOperation&& _initialOp)
 	}
 	else
 		fatalParserError(
-			m_flavour == AsmFlavour::IULIA ?
+			m_flavour == AsmFlavour::Yul ?
 			"Function name expected." :
 			"Assembly instruction or function name required in front of \"(\")"
 		);
@@ -570,7 +565,7 @@ TypedName Parser::parseTypedName()
 	RecursionGuard recursionGuard(*this);
 	TypedName typedName = createWithLocation<TypedName>();
 	typedName.name = expectAsmIdentifier();
-	if (m_flavour == AsmFlavour::IULIA)
+	if (m_flavour == AsmFlavour::Yul)
 	{
 		expectToken(Token::Colon);
 		typedName.location.end = endPosition();
@@ -582,7 +577,7 @@ TypedName Parser::parseTypedName()
 string Parser::expectAsmIdentifier()
 {
 	string name = currentLiteral();
-	if (m_flavour == AsmFlavour::IULIA)
+	if (m_flavour == AsmFlavour::Yul)
 	{
 		switch (currentToken())
 		{

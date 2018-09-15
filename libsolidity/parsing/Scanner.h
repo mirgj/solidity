@@ -197,8 +197,8 @@ private:
 
 	/// Skips all whitespace and @returns true if something was skipped.
 	bool skipWhitespace();
-	/// Skips all whitespace except Line feeds and returns true if something was skipped
-	bool skipWhitespaceExceptLF();
+	/// Skips all whitespace that are neither '\r' nor '\n'.
+	void skipWhitespaceExceptUnicodeLinebreak();
 	Token::Value skipSingleLineComment();
 	Token::Value skipMultiLineComment();
 
@@ -218,12 +218,15 @@ private:
 	/// is scanned.
 	bool scanEscape();
 
+	/// @returns true iff we are currently positioned at a unicode line break.
+	bool isUnicodeLinebreak();
+
 	/// Return the current source position.
 	int sourcePos() const { return m_source.position(); }
 	bool isSourcePastEndOfInput() const { return m_source.isPastEndOfInput(); }
 
 	TokenDesc m_skippedComment;  // desc for current skipped comment
-	TokenDesc m_nextSkippedComment; // desc for next skiped comment
+	TokenDesc m_nextSkippedComment; // desc for next skipped comment
 
 	TokenDesc m_currentToken;  // desc for current token (as returned by Next())
 	TokenDesc m_nextToken;     // desc for next token (one token look-ahead)
